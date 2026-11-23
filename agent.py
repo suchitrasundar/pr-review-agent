@@ -99,3 +99,69 @@ def build_diff(files: list[dict]) -> tuple[str, dict[str, set[int]], list[str]]:
         valid[name] = lines
         used += len(block)
     return "\n".join(parts), valid, skipped
+
+
+async def review_pull_request(gh: GitHubRepo, number: int) -> dict:
+    """Run the agent on a PR. Returns a dict ready for GitHubRepo.create_review()."""
+    pr = await gh.get_pr(number)
+    head_sha = pr["head"]["sha"]
+    files = await gh.get_pr_files(number)
+    diff, valid_lines, skipped = build_diff(files)
+
+    if not diff:
+        return {"commit_id": head_sha, "event": "COMMENT", "comments": [],
+                "body": "🤖 Nothing reviewable in this PR (only ignored, binary or very large files)."}
+
+    user_msg = (
+        f"Repository: {gh.owner}/{gh.repo}\n"
+        f"PR #{number}: {pr['title']}\n"
+        f"Author: {pr['user']['login']}\n"
+        f"Base: {pr['base']['ref']} ← Head: {pr['head']['ref']}\n\n"
+        f"Description:\n{pr.get('body') or '(none)'}\n\n"
+        f"Changed files ({len(files)}):\n\n{diff}"
+    )
+    if skipped:
+        user_msg += f"\n\nNot shown (ignored/binary/too large): {', '.join(skipped[:50])}"
+
+    client = AsyncAnthropic()
+    messages = [{"role": "user", "content": user_msg}]
+    result = None
+
+    for step in range(MAX_STEPS):
+        resp = await client.messages.create(
+            model=MODEL, max_tokens=8000, system=SYSTEM_PROMPT, tools=TOOLS, messages=messages
+        )
+        messages.append({"role": "assistant", "content": resp.content})
+
+        if resp.stop_reason != "tool_use":
+            text = "".join(b.text for b in resp.content if b.type == "text")
+            result = {"summary": text or "Review complete.", "verdict": "comment", "comments": []}
+            break
+
+        tool_results = []
+        for block in resp.content:
+            if block.type != "tool_use":
+                continue
+            if block.name == "submit_review":
+                result = block.input
+                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": "Submitted."})
+            elif block.name == "read_file":
+                path = block.input.get("path", "")
+                log.info("step %d: read_file %s", step, path)
+                content = await gh.get_file(path, head_sha)
+                if content is None:
+                    content = f"File not found: {path}"
+                elif len(content) > MAX_FILE_CHARS:
+                    content = content[:MAX_FILE_CHARS] + "\n... [truncated]"
+                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": content})
+            else:
+                tool_results.append({"type": "tool_result", "tool_use_id": block.id,
+                                     "content": "Unknown tool", "is_error": True})
+        if result is not None:
+            break
+        messages.append({"role": "user", "content": tool_results})
+
+    if result is None:
+        result = {"summary": "Review hit the step limit before finishing.", "verdict": "comment", "comments": []}
+
+    return to_github_review(result, head_sha, valid_lines)
