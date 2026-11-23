@@ -80,3 +80,22 @@ TOOLS = [
 ]
 
 SEVERITY_ICON = {"critical": "🔴", "warning": "🟠", "suggestion": "💡"}
+
+
+def build_diff(files: list[dict]) -> tuple[str, dict[str, set[int]], list[str]]:
+    """Return (annotated diff text, commentable lines per file, skipped file names)."""
+    parts, valid, skipped, used = [], {}, [], 0
+    for f in files:
+        name = f["filename"]
+        if any(fnmatch(name, p) for p in IGNORE) or not f.get("patch"):
+            skipped.append(name)
+            continue
+        annotated, lines = annotate_patch(f["patch"])
+        block = f"### {name} ({f['status']}, +{f['additions']}/-{f['deletions']})\n```diff\n{annotated}\n```\n"
+        if used + len(block) > MAX_DIFF_CHARS:
+            skipped.append(name)
+            continue
+        parts.append(block)
+        valid[name] = lines
+        used += len(block)
+    return "\n".join(parts), valid, skipped
