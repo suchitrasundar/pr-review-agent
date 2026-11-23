@@ -165,3 +165,29 @@ async def review_pull_request(gh: GitHubRepo, number: int) -> dict:
         result = {"summary": "Review hit the step limit before finishing.", "verdict": "comment", "comments": []}
 
     return to_github_review(result, head_sha, valid_lines)
+
+
+def to_github_review(result: dict, head_sha: str, valid_lines: dict[str, set[int]]) -> dict:
+    inline, orphans = [], []
+    for c in result.get("comments", []):
+        icon = SEVERITY_ICON.get(c.get("severity"), "💬")
+        body = f"{icon} **{c.get('severity', 'note')}**: {c['body']}"
+        if c.get("line") in valid_lines.get(c.get("path"), set()):
+            inline.append({"path": c["path"], "line": c["line"], "side": "RIGHT", "body": body})
+        else:  # GitHub rejects comments outside the diff, so fold them into the summary
+            orphans.append(f"- `{c.get('path')}:{c.get('line')}` {body}")
+
+    body = f"## 🤖 AI Review\n\n{result.get('summary', '')}"
+    if orphans:
+        body += "\n\n### Additional notes\n" + "\n".join(orphans)
+
+    # Default to COMMENT so the bot never blocks merges; opt in to stronger verdicts.
+    event = "COMMENT"
+    if os.getenv("ALLOW_VERDICTS", "false").lower() == "true":
+        event = {"approve": "APPROVE", "request_changes": "REQUEST_CHANGES"}.get(result.get("verdict"), "COMMENT")
+
+    return {"commit_id": head_sha, "body": body, "comments": inline, "event": event}
+
+
+def pretty(review: dict) -> str:
+    return json.dumps(review, indent=2, ensure_ascii=False)
