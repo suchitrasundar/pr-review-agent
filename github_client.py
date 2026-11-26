@@ -90,3 +90,29 @@ class GitHubRepo:
         )
         r.raise_for_status()
         return r.json()
+
+
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def annotate_patch(patch: str) -> tuple[str, set[int]]:
+    """Prefix each diff line with its line number in the NEW file.
+
+    Returns the annotated patch (so the model can cite exact lines) and the set of
+    new-file line numbers GitHub will accept for inline review comments.
+    """
+    out, commentable, new_line = [], set(), 0
+    for line in patch.splitlines():
+        m = HUNK_RE.match(line)
+        if m:
+            new_line = int(m.group(1))
+            out.append(line)
+        elif line.startswith("-"):
+            out.append(f"     {line}")
+        elif line.startswith("\\"):
+            out.append(f"     {line}")
+        else:  # "+" added line or " " context line
+            commentable.add(new_line)
+            out.append(f"{new_line:>4} {line}")
+            new_line += 1
+    return "\n".join(out), commentable
